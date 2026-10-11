@@ -1,0 +1,18 @@
+# Keep the working tree predictable across Windows (where this app runs) and
+# Linux (where the release workflow builds it).
+
+* text=auto eol=lf
+
+# cmd.exe requires CRLF line endings; a LF-only .bat can misbehave.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell is happy with LF.
+*.ps1 text eol=lf
+
+*.png binary
+*.ico binary
+*.exe binary
+*.zip binary
+*.keystore binary
+*.jks binary
