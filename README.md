@@ -32,8 +32,9 @@ or double-click [`packaging/Launch-MathChallenge.bat`](packaging/Launch-MathChal
 or right-click `MathChallenge.ps1` → **Run with PowerShell**.
 
 **Requirements:** Windows 10/11 x64, .NET Framework 4.7.2+ (preinstalled on
-Windows 10 1803+), Windows PowerShell 5.1. The window is 1160×820 and not
-resizable, so a 1200×900 screen or larger is needed.
+Windows 10 1803+), Windows PowerShell 5.1. The window opens at 1160×820 and can
+be resized down to 1000×700 or up to fill the screen, so a 1280×720 display or
+larger is comfortable.
 
 ## Games
 
@@ -47,10 +48,15 @@ resizable, so a 1200×900 screen or larger is needed.
 **Scoring:** answer streaks multiply points (×2 at 5, ×3 at 10, ×4 at 15, ×5 at
 20); every 5 correct answers in a game levels you up and multiplies again.
 
-### Keyboard shortcuts
+### Keyboard & mouse
 
-| Key | Action |
+| Input | Action |
 | --- | --- |
+| Drag any empty area, or the title bar | Move the window |
+| Drag a window edge or corner | Resize (resize arrows appear at the edges) |
+| Double-click the title bar, or click the green dot | Maximize / restore |
+| Yellow dot | Minimize |
+| Red dot | Close |
 | `Enter` | Submit an answer |
 | `D1`–`D9` / `Numpad1`–`Numpad9` | Fill the selected Sudoku cell (or toggle a pencil note) |
 | Arrow keys | Move the Sudoku selection |

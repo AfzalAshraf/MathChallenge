@@ -5,6 +5,15 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
+# A chromeless window (WindowStyle=None + AllowsTransparency=True) has no
+# non-client frame, so an edge resize has to be started by hand: drop the mouse
+# capture and send WM_NCLBUTTONDOWN (0xA1) with the right hit-test code.
+try{Add-Type -Namespace Win32 -Name Chrome -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr SendMessage(System.IntPtr hWnd, int msg, System.IntPtr wParam, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ReleaseCapture();
+'@
+}catch{}
+
 # ============================================================
 # STATE
 # ============================================================
@@ -49,9 +58,9 @@ $script:brainTeasers=@{
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Cognitive Trainer" Width="1160" Height="820"
+    Title="Cognitive Trainer" Width="1160" Height="820" MinWidth="1000" MinHeight="700"
     WindowStartupLocation="CenterScreen" WindowStyle="None"
-    AllowsTransparency="True" Background="Transparent" ResizeMode="CanMinimize">
+    AllowsTransparency="True" Background="Transparent" ResizeMode="CanResize">
 <Window.Resources>
     <Style x:Key="ST" TargetType="Thumb"><Setter Property="Template"><Setter.Value>
         <ControlTemplate TargetType="Thumb"><Border x:Name="t" Background="#25FFFFFF" CornerRadius="3" Margin="1,0" MinHeight="18"/>
@@ -177,6 +186,7 @@ $script:brainTeasers=@{
     <Style TargetType="Separator"><Setter Property="Height" Value="1"/><Setter Property="Background" Value="#12FFFFFF"/><Setter Property="Margin" Value="10,4"/></Style>
 </Window.Resources>
 
+<Grid>
 <Border x:Name="MB" Margin="12" CornerRadius="16" BorderThickness="1">
     <Border.BorderBrush><SolidColorBrush Color="White" Opacity="0.1"/></Border.BorderBrush>
     <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
@@ -184,7 +194,7 @@ $script:brainTeasers=@{
     </LinearGradientBrush></Border.Background>
     <Border.Effect><DropShadowEffect Color="Black" BlurRadius="40" ShadowDepth="0" Opacity="0.7"/></Border.Effect>
     <Grid><Grid.RowDefinitions><RowDefinition Height="42"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-    <Border x:Name="TB" Grid.Row="0" Background="Transparent" CornerRadius="16,16,0,0"><Grid>
+    <Border x:Name="TB" Grid.Row="0" Background="Transparent" Cursor="SizeAll" CornerRadius="16,16,0,0"><Grid>
         <StackPanel Orientation="Horizontal" Margin="16,0" VerticalAlignment="Center">
             <Button x:Name="btnX" Style="{StaticResource Dot}" Background="#FF5F57" Margin="0,0,7,0"/>
             <Button x:Name="btnMn" Style="{StaticResource Dot}" Background="#FFBD2E" Margin="0,0,7,0"/>
@@ -376,6 +386,21 @@ $script:brainTeasers=@{
     </StackPanel></Grid>
 
     </Grid></Grid></Border>
+<!-- Resize handles. WindowStyle=None + AllowsTransparency=True leaves the window
+     with no OS frame, so there is nothing to grab at the edges. These eight
+     transparent rectangles sit in the 12px margin ring around the card, carry the
+     resize cursors a frame would normally provide, and start a real Win32 resize
+     loop using the hit-test code in Tag (10-17 = HTLEFT..HTBOTTOMRIGHT).
+     Fill must be Transparent, not null, or they are not hit-testable. -->
+<Rectangle x:Name="rzL"  Tag="10" Fill="Transparent" Cursor="SizeWE"   Width="12"  HorizontalAlignment="Left"/>
+<Rectangle x:Name="rzR"  Tag="11" Fill="Transparent" Cursor="SizeWE"   Width="12"  HorizontalAlignment="Right"/>
+<Rectangle x:Name="rzT"  Tag="12" Fill="Transparent" Cursor="SizeNS"   Height="12" VerticalAlignment="Top"    Margin="16,0"/>
+<Rectangle x:Name="rzB"  Tag="15" Fill="Transparent" Cursor="SizeNS"   Height="12" VerticalAlignment="Bottom" Margin="16,0"/>
+<Rectangle x:Name="rzTL" Tag="13" Fill="Transparent" Cursor="SizeNWSE" Width="20" Height="20" HorizontalAlignment="Left"  VerticalAlignment="Top"/>
+<Rectangle x:Name="rzTR" Tag="14" Fill="Transparent" Cursor="SizeNESW" Width="20" Height="20" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+<Rectangle x:Name="rzBL" Tag="16" Fill="Transparent" Cursor="SizeNESW" Width="20" Height="20" HorizontalAlignment="Left"  VerticalAlignment="Bottom"/>
+<Rectangle x:Name="rzBR" Tag="17" Fill="Transparent" Cursor="SizeNWSE" Width="20" Height="20" HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
+</Grid>
 </Window>
 "@
 
@@ -398,11 +423,37 @@ function NB([string]$c){[System.Windows.Media.BrushConverter]::new().ConvertFrom
 function Go($n){$sH.Visibility="Collapsed";$sG.Visibility="Collapsed";$sSt.Visibility="Collapsed";$sA.Visibility="Collapsed";$sS.Visibility="Collapsed";$sR.Visibility="Collapsed"
     switch($n){"Home"{$sH.Visibility="Visible"}"Grid"{$sG.Visibility="Visible"}"Stroop"{$sSt.Visibility="Visible"}"Arith"{$sA.Visibility="Visible"}"Sudoku"{$sS.Visibility="Visible"}"Result"{$sR.Visibility="Visible"}}}
 
+# Window chrome: drag any empty surface to move, drag an edge to resize.
+function RZVis($v){foreach($el in $script:rzEls){if($el){$el.Visibility=$v}}}
+$script:rzEls=@($w.FindName("rzL"),$w.FindName("rzR"),$w.FindName("rzT"),$w.FindName("rzB"),$w.FindName("rzTL"),$w.FindName("rzTR"),$w.FindName("rzBL"),$w.FindName("rzBR"))
+$script:rzStart={param($s,$e)
+    $e.Handled=$true
+    if($w.WindowState -ne "Normal"){return}
+    try{
+        $h=(New-Object System.Windows.Interop.WindowInteropHelper $w).Handle
+        if($h -eq [IntPtr]::Zero){return}
+        [Win32.Chrome]::ReleaseCapture()|Out-Null
+        [Win32.Chrome]::SendMessage($h,0xA1,[IntPtr][int]$s.Tag,[IntPtr]::Zero)|Out-Null
+    }catch{}
+}
+foreach($el in $script:rzEls){if($el){$el.Add_MouseLeftButtonDown($script:rzStart)}}
+# The title strip alone was a 42px band of transparent pixels with a 25%-opacity
+# label on it - nothing that looked draggable. Allow moving the window from any
+# empty surface instead; controls mark the event handled, so play is unaffected.
+$w.Add_MouseLeftButtonDown({param($s,$e)
+    if($e.Handled){return}
+    if($e.OriginalSource.GetType().Name -match "Button|TextBox|Thumb|ScrollBar|ComboBox|CheckBox|RadioButton|Slider|ListBox|Rectangle|MenuItem"){return}
+    try{$w.DragMove();$e.Handled=$true}catch{}
+})
+# The timer bar was pinned to the 1160px design width; measure its track instead
+# so it still spans the window after a resize.
+function TBW{$aw=0;try{$aw=$tBar.Parent.ActualWidth}catch{};if($aw -lt 200){$aw=1140};return $aw}
+
 # Title bar
-$TB.Add_MouseLeftButtonDown({if($_.ClickCount -eq 2){if($w.WindowState -eq 'Maximized'){$w.WindowState='Normal'}else{$w.WindowState='Maximized'}}else{try{$w.DragMove()}catch{}}})
+$TB.Add_MouseLeftButtonDown({$_.Handled=$true;if($_.ClickCount -eq 2){if($w.WindowState -eq 'Maximized'){$w.WindowState='Normal'}else{$w.WindowState='Maximized'}}else{try{$w.DragMove()}catch{}}})
 $btnX.Add_Click({$w.Close()});$btnMn.Add_Click({$w.WindowState='Minimized'})
 $btnMx.Add_Click({if($w.WindowState -eq 'Maximized'){$w.WindowState='Normal'}else{$w.WindowState='Maximized'}})
-$w.Add_StateChanged({if($w.WindowState -eq 'Maximized'){$MB.Margin=[System.Windows.Thickness]::new(0);$MB.CornerRadius=[System.Windows.CornerRadius]::new(0);$MB.Effect=$null;$TB.CornerRadius=[System.Windows.CornerRadius]::new(0)}else{$MB.Margin=[System.Windows.Thickness]::new(12);$MB.CornerRadius=[System.Windows.CornerRadius]::new(16);$sh=New-Object System.Windows.Media.Effects.DropShadowEffect;$sh.Color=[System.Windows.Media.Colors]::Black;$sh.BlurRadius=40;$sh.ShadowDepth=0;$sh.Opacity=0.7;$MB.Effect=$sh;$TB.CornerRadius=[System.Windows.CornerRadius]::new(16,16,0,0)}})
+$w.Add_StateChanged({if($w.WindowState -eq 'Maximized'){$MB.Margin=[System.Windows.Thickness]::new(0);$MB.CornerRadius=[System.Windows.CornerRadius]::new(0);$MB.Effect=$null;$TB.CornerRadius=[System.Windows.CornerRadius]::new(0);RZVis "Collapsed"}else{$MB.Margin=[System.Windows.Thickness]::new(12);$MB.CornerRadius=[System.Windows.CornerRadius]::new(16);$sh=New-Object System.Windows.Media.Effects.DropShadowEffect;$sh.Color=[System.Windows.Media.Colors]::Black;$sh.BlurRadius=40;$sh.ShadowDepth=0;$sh.Opacity=0.7;$MB.Effect=$sh;$TB.CornerRadius=[System.Windows.CornerRadius]::new(16,16,0,0);RZVis "Visible"}})
 
 $ctx=New-Object System.Windows.Controls.ContextMenu
 foreach($it in @("Reset","---","About","---","Exit")){if($it -eq "---"){$ctx.Items.Add((New-Object System.Windows.Controls.Separator))|Out-Null}else{$mi=New-Object System.Windows.Controls.MenuItem;$mi.Header=$it;$mi.Tag=$it;$mi.Add_Click({switch($this.Tag){"Reset"{$script:gamesPlayed=0;$script:highScore=0;$script:bestStreak=0;RH}"About"{[System.Windows.MessageBox]::Show("Cognitive Trainer - Fixed Stroop Edition","About","OK","Information")|Out-Null}"Exit"{$w.Close()}}});$ctx.Items.Add($mi)|Out-Null}}
@@ -422,7 +473,7 @@ $script:gt.Add_Tick({
     if($script:currentGame -like "Sudoku*"){$script:sudokuTime++;$m=[math]::Floor($script:sudokuTime/60);$s=$script:sudokuTime%60;$ssTm.Text=("{0}:{1:D2}" -f $m,$s);return}
     if($script:timeLeft -le 0){return};$script:timeLeft--;$aTm.Text="$($script:timeLeft)s"
     $maxT=if($script:currentGame -match "Speed|VSpeed"){60}elseif($script:currentGame -match "Q$"){120}else{30}
-    $pct=[math]::Max(0,$script:timeLeft/$maxT);$tBar.Width=1140*$pct
+    $pct=[math]::Max(0,$script:timeLeft/$maxT);$tBar.Width=(TBW)*$pct
     if($pct -gt 0.5){$tBar.Background=NB "#6C5CE7";$aTm.Foreground=NB "White"}elseif($pct -gt 0.25){$tBar.Background=NB "#FDCB6E";$aTm.Foreground=NB "#FDCB6E"}else{$tBar.Background=NB "#E84855";$aTm.Foreground=NB "#E84855"}
     if($script:timeLeft -le 0){EndArith}
 })
@@ -678,7 +729,7 @@ function Launch($mode){$script:currentGame=$mode
     $aTl.Text=$gi.T;$dfc=switch($gi.Df){"Easy"{"#00B894"}"Medium"{"#FDCB6E"}"Hard"{"#E84855"}};$aDf.Text=$gi.Df.ToUpper();$aDf.Foreground=NB $dfc
     $tm=if($gi.Tm){$gi.Tm}elseif($mode -match "Speed|VSpeed"){60}else{30}
     $script:timeLeft=$tm;$aSc.Text="0";$aSk.Text="0";$aTm.Text="$($script:timeLeft)s";$aTm.Foreground=NB "White"
-    $aFb.Text="";$aIn.Text="";$tPnl.Visibility="Collapsed";$tBar.Width=1140;$tBar.Background=NB "#6C5CE7"
+    $aFb.Text="";$aIn.Text="";$tPnl.Visibility="Collapsed";$tBar.Width=(TBW);$tBar.Background=NB "#6C5CE7"
     $aHint.Visibility=if($mode -match "Q$"){"Visible"}else{"Collapsed"}
     $q=(MkQ);$aQ.Text=$q;$aQ.FontSize=if($mode -match "Q$"){17}else{32}
     Go "Arith";$aIn.Focus();$script:gt.Start()}

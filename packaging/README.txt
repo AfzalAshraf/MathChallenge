@@ -40,7 +40,8 @@ REQUIREMENTS
   * Windows 10 or 11 (64-bit). Windows 7/8.1 generally work but are untested.
   * .NET Framework 4.7.2 or newer (preinstalled on Windows 10 1803 and later).
   * Windows PowerShell 5.1 (built into Windows) for Options B and C.
-  * A screen at least 1200x900 - the window is 1160x820 and is not resizable.
+  * A screen of about 1280x720 or larger. The window opens at 1160x820 and
+    resizes from 1000x700 up to full screen.
 
 
 "WINDOWS PROTECTED YOUR PC"
@@ -50,6 +51,15 @@ Choose "More info" > "Run anyway". To verify the download instead, compare its
 SHA-256 against the checksums file published with this release:
 
     certutil -hashfile MathChallenge.exe SHA256
+
+
+WINDOW
+------
+  Drag any empty area, or the title bar  Move the window
+  Drag a window edge or corner           Resize (resize arrows appear at edges)
+  Double-click the title bar             Maximize / restore
+  Red / yellow / green dots              Close / minimize / maximize
+  Right-click the window                 Reset scores, About, Exit
 
 
 KEYBOARD SHORTCUTS
