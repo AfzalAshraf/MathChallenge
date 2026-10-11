@@ -15,7 +15,11 @@ name: Build & Publish Windows Release
 #   * Publishes with the `gh` CLI, which is preinstalled on GitHub-hosted
 #     runners, instead of a third-party action pinned to a moving branch
 #     (`@main`). No supply chain dependency, and no secret to rotate.
-#   * `actions/checkout@v4` (not v2) and `actions/upload-artifact@v4` (not v1).
+#   * Current action majors, all running on Node 24: checkout@v7,
+#     upload-artifact@v7, download-artifact@v8. The artifact pair is
+#     deliberately mismatched - those two repositories version independently,
+#     so v7/v8 is the current combination and not a typo to "fix".
+#     (The marketplace action this replaces used checkout@v2 and setup-java@v1.)
 #
 # Manual runs ("Run workflow") build and upload artifacts but do NOT create a
 # Release unless you name an existing tag - handy for testing the packaging
@@ -64,7 +68,7 @@ jobs:
       body: ${{ steps.notes.outputs.body }}
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0    # full history, so release notes can diff against the previous tag
 
@@ -285,7 +289,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.artifact }}
           path: |
@@ -311,7 +315,7 @@ jobs:
       BODY: ${{ needs.build.outputs.body }}
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build.outputs.artifact }}
           path: dist

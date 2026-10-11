@@ -22,7 +22,9 @@ name: Android APK (template - not active in this repo)
 #   5. The APK/AAB is attached to a GitHub Release on that same tag.
 #
 # Compared with the `sangatdesai/release-apk` marketplace action this replaces:
-#   * `actions/checkout@v4` and `actions/setup-java@v4` (not v2 / v1).
+#   * Current action majors, all on Node 24: checkout@v7, setup-java@v6
+#     (v1-v4 are officially deprecated), setup-gradle@v6, upload-artifact@v7.
+#     Self-hosted runners need Actions Runner v2.327.1+ for checkout@v5+.
 #   * JDK 17, which AGP 8.x requires (JDK 11 only works up to AGP 7.x).
 #   * Gradle dependency caching via `gradle/actions/setup-gradle`.
 #   * Publishing with the preinstalled `gh` CLI and the built-in GITHUB_TOKEN.
@@ -74,7 +76,7 @@ jobs:
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -110,14 +112,14 @@ jobs:
 
       - name: Set up JDK
         if: steps.detect.outputs.android == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: Set up Gradle (dependency + build caching)
         if: steps.detect.outputs.android == 'true'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # -----------------------------------------------------------------------
       # OPTIONAL: sign the release build.
@@ -181,7 +183,7 @@ jobs:
 
       - name: Upload artifacts
         if: steps.detect.outputs.android == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-${{ github.ref_name }}
           path: dist/*
