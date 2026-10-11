@@ -117,4 +117,8 @@ jobs:
           if ($issues.Count -eq 0) { Write-Host 'PSScriptAnalyzer: no error/warning-level issues.'; exit 0 }
           $issues | Group-Object RuleName | Sort-Object Count -Descending |
             Select-Object Count, Name | Format-Table -AutoSize | Out-String -Width 120 | Write-Host
-          Write-Host "::warning::PSScriptAnalyzer reported $($issues.Count) issue(s). Advisory only."
+          # Put the breakdown in the annotation as well, since a job's log output
+          # is not always reachable from the PR conversation.
+          $summary = ($issues | Group-Object RuleName | Sort-Object Count -Descending |
+                      ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+          Write-Host "::warning::PSScriptAnalyzer reported $($issues.Count) issue(s): $summary"
