@@ -1,0 +1,348 @@
+name: Build & Publish Windows Release
+
+# =============================================================================
+# This is the Windows equivalent of the "Build and Release APK" action.
+#
+#   push a tag  ->  runner packages MathChallenge.ps1 into MathChallenge.exe
+#                ->  zips it with a launcher + README + LICENSE
+#                ->  creates a GitHub Release on THAT SAME TAG with the files attached
+#
+# Differences from the marketplace APK action, and why:
+#   * Uses the built-in `GITHUB_TOKEN` (with `permissions: contents: write`)
+#     instead of a personal access token stored as a repo secret. A PAT is not
+#     required to publish a release to your own repository, and keeping one out
+#     of the repo removes a secret-leak risk.
+#   * Publishes with the `gh` CLI, which is preinstalled on GitHub-hosted
+#     runners, instead of a third-party action pinned to a moving branch
+#     (`@main`). No supply chain dependency, and no secret to rotate.
+#   * Current action majors, all running on Node 24: checkout@v7,
+#     upload-artifact@v7, download-artifact@v8. The artifact pair is
+#     deliberately mismatched - those two repositories version independently,
+#     so v7/v8 is the current combination and not a typo to "fix".
+#     (The marketplace action this replaces used checkout@v2 and setup-java@v1.)
+#
+# Manual runs ("Run workflow") build and upload artifacts but do NOT create a
+# Release unless you name an existing tag - handy for testing the packaging
+# before you cut a real release.
+# =============================================================================
+
+on:
+  push:
+    tags:
+      - 'v*'          # v1.0, v2.3.1
+      - '[0-9]*'      # 1.0, 1.0.3, 2026.01
+      - 'release-*'   # release-1.0
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish a Release against (leave blank to build artifacts only)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write   # GITHUB_TOKEN needs this to create/upload release assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: MathChallenge
+  APP_TITLE: Cognitive Trainer
+  SCRIPT: MathChallenge.ps1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  build:
+    name: Package Windows build
+    runs-on: windows-latest   # ps2exe + WPF metadata need Windows/.NET Framework
+    timeout-minutes: 25
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      label: ${{ steps.meta.outputs.label }}
+      version: ${{ steps.meta.outputs.version }}
+      publish: ${{ steps.meta.outputs.publish }}
+      title: ${{ steps.meta.outputs.title }}
+      artifact: ${{ steps.meta.outputs.artifact }}
+      body: ${{ steps.notes.outputs.body }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0    # full history, so release notes can diff against the previous tag
+
+      - name: Resolve tag, version and release metadata
+        id: meta
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          MANUAL_TAG: ${{ github.event.inputs.tag }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Set-Out([string]$k, [string]$v) { Add-Content -Path $env:GITHUB_OUTPUT -Value "$k=$v" -Encoding utf8 }
+
+          $tag = ''
+          if ($env:EVENT_NAME -eq 'push' -and $env:REF_TYPE -eq 'tag') { $tag = $env:REF_NAME }
+          elseif ($env:MANUAL_TAG) { $tag = $env:MANUAL_TAG.Trim() }
+
+          # Only publish when we have a real tag, and never let an arbitrary string
+          # reach a file name, a release title or a command line.
+          $publish = 'false'
+          if ($tag) {
+            if ($tag -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$') {
+              throw "Refusing to publish tag '$tag': use letters, digits, '.', '_', '+' or '-' only (e.g. v1.2.3)."
+            }
+            $publish = 'true'
+          }
+
+          # ps2exe wants a 4-part numeric assembly version: v1.2 -> 1.2.0.0
+          $digits = @(($tag -split '[^0-9]+') | Where-Object { $_ -ne '' })
+          if ($digits.Count -eq 0) { $digits = @('0', '0', '1') }
+          while ($digits.Count -lt 4) { $digits += '0' }
+          $digits = @($digits[0..3] | ForEach-Object { if ([int64]$_ -gt 65535) { '65535' } else { $_ } })
+          $version = $digits -join '.'
+
+          # $label is the tag, made safe for use in file and artifact names.
+          $label = if ($tag) { $tag -replace '[^A-Za-z0-9._+-]', '_' } else { "dev-$env:RUN_NUMBER" }
+
+          Set-Out tag      $tag
+          Set-Out publish  $publish
+          Set-Out version  $version
+          Set-Out label    $label
+          Set-Out artifact "$env:APP_NAME-$label-win"
+          Set-Out title    "$env:APP_TITLE $label"
+          Write-Host "tag='$tag' publish=$publish version=$version label=$label"
+
+      - name: Validate the script before packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null; $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $env:SCRIPT).Path, [ref]$tokens, [ref]$errors)
+          if ($errors) {
+            $errors | ForEach-Object { Write-Host "::error file=$($env:SCRIPT),line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+            exit 1
+          }
+          Write-Host "$env:SCRIPT parses cleanly ($($tokens.Count) tokens)."
+
+      - name: Install ps2exe
+        id: ps2exe
+        shell: powershell   # Windows PowerShell 5.1: most reliable route to a .NET Framework 4.x exe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+          if (-not (Get-Module -ListAvailable -Name ps2exe)) {
+            if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+              Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+            }
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module -Name ps2exe -Scope CurrentUser -Force -AllowClobber
+          }
+          Import-Module ps2exe
+          $v = (Get-Module ps2exe).Version.ToString()
+          Write-Host "ps2exe $v ready"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v" -Encoding utf8
+
+      - name: Build MathChallenge.exe
+        shell: powershell
+        env:
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ps2exe
+
+          # Absolute paths throughout: ps2exe resolves a relative -outputFile against
+          # the process working directory, which is not guaranteed to match the
+          # PowerShell location.
+          $dist = Join-Path (Get-Location).ProviderPath 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $exe = Join-Path $dist "$env:APP_NAME.exe"
+
+          # Only pass flags this ps2exe version actually has, so a future release
+          # of the module cannot break the build with an unknown-parameter error.
+          $supported = (Get-Command Invoke-ps2exe).Parameters.Keys
+          $p = @{
+            inputFile  = (Resolve-Path $env:SCRIPT).Path
+            outputFile = $exe
+          }
+          $want = [ordered]@{
+            noConsole   = $true      # WPF app - do not spawn a console window
+            sta         = $true      # WPF requires a single-threaded apartment
+            runtime40   = $true      # target .NET Framework 4.x
+            version     = $env:APP_VERSION
+            title       = $env:APP_TITLE
+            product     = $env:APP_NAME
+            description = "$env:APP_TITLE - offline brain training: arithmetic, Vedic maths, Sudoku, Stroop, Schulte, N-back"
+            copyright   = 'Apache-2.0 (see LICENSE)'
+          }
+          foreach ($k in $want.Keys) {
+            if ($supported -contains $k) { $p[$k] = $want[$k] }
+            else { Write-Host "-$k is not supported by this ps2exe version; skipping." }
+          }
+
+          Invoke-ps2exe @p
+          if (-not (Test-Path $exe)) { throw "ps2exe reported success but $exe was not produced." }
+          Write-Host ("Built {0} ({1:N2} MB)" -f $exe, ((Get-Item $exe).Length / 1MB))
+
+      - name: Assemble the distributable zip
+        shell: pwsh
+        env:
+          LABEL: ${{ steps.meta.outputs.label }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root      = (Get-Location).ProviderPath
+          $dist      = Join-Path $root 'dist'
+          $stageRoot = Join-Path $dist 'stage'
+          $stage     = Join-Path $stageRoot "$env:APP_NAME-$env:LABEL"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # Everything an end user needs, and nothing they do not.
+          Copy-Item (Join-Path $dist "$env:APP_NAME.exe")        $stage
+          Copy-Item (Join-Path $root $env:SCRIPT)                $stage
+          Copy-Item (Join-Path $root 'LICENSE')                  $stage
+          Copy-Item (Join-Path $root 'packaging' 'README.txt')   $stage
+          Get-ChildItem (Join-Path $root 'packaging') -Filter '*.bat' | Copy-Item -Destination $stage
+
+          $zip = Join-Path $dist "$env:APP_NAME-$env:LABEL-windows.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+
+          # ZipFile rather than Compress-Archive: Windows PowerShell's Compress-Archive
+          # writes '\' separators into entry names, which extracts to flat, oddly named
+          # files outside Windows. Zipping $stageRoot (the parent) keeps
+          # "$APP_NAME-$LABEL/" as the single top-level folder inside the archive, so
+          # extracting into Downloads does not scatter loose files.
+          if (-not ('System.IO.Compression.ZipFile' -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stageRoot, $zip)
+          Remove-Item -Recurse -Force $stageRoot
+
+          # Checksums, so a download can be verified for an otherwise unsigned exe.
+          $sums = Join-Path $dist "$env:APP_NAME-$env:LABEL-sha256.txt"
+          Get-ChildItem $dist -File | Where-Object { @('.exe', '.zip') -contains $_.Extension } | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          } | Set-Content -Path $sums -Encoding utf8
+
+          Get-ChildItem $dist -File | Select-Object Name, @{n = 'KB'; e = { [math]::Round($_.Length / 1KB, 1) } } |
+            Format-Table -AutoSize | Out-String -Width 120 | Write-Host
+
+      - name: Write release notes
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          PUBLISH: ${{ steps.meta.outputs.publish }}
+          LABEL: ${{ steps.meta.outputs.label }}
+        run: |
+          set -euo pipefail
+
+          if [ "$PUBLISH" != "true" ]; then
+            {
+              echo 'body<<NOTES_EOF'
+              echo "Manual build (no tag supplied): artifacts only, no GitHub Release was created."
+              echo 'NOTES_EOF'
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --tags --force --quiet origin || true
+          PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+          ZIP="${APP_NAME}-${LABEL}-windows.zip"
+
+          {
+            echo "## ${APP_TITLE} ${TAG}"
+            echo
+            echo "Offline brain-training suite for Windows. Portable: no installer, no admin rights, no network access, no files written to disk."
+            echo
+            echo "### Download"
+            echo
+            echo "| File | What it is |"
+            echo "| --- | --- |"
+            echo "| \`${ZIP}\` | **Recommended.** \`${APP_NAME}.exe\`, the original \`.ps1\`, a double-click launcher and instructions. |"
+            echo "| \`${APP_NAME}.exe\` | Standalone executable (needs .NET Framework 4.7.2+, preinstalled on Windows 10 1803+). |"
+            echo "| \`${APP_NAME}-${LABEL}-sha256.txt\` | SHA-256 checksums for the files above. |"
+            echo
+            echo "### Run it"
+            echo
+            echo "1. Download the zip and extract it anywhere (Desktop, a USB stick - it is self-contained)."
+            echo "2. Double-click \`${APP_NAME}.exe\`."
+            echo "3. Windows SmartScreen may warn about an unsigned executable: choose **More info > Run anyway**."
+            echo
+            echo "### Games"
+            echo
+            echo "Schulte 5x5 / 7x7, Color Stroop, Speed Grid, N-Back, Vedic maths drills (11 Sandwich, Ghost Base, Sparkle Square, Last Stand, Vedic Speed), brain teasers, and Easy/Medium/Hard Sudoku."
+            if [ -n "$PREV" ]; then
+              echo
+              echo "### Changes since \`${PREV}\`"
+              echo
+              git log --no-merges --date=short --pretty=format:'- %s (%h, %ad)' "${PREV}..${TAG}" || true
+              echo
+            fi
+          } > RELEASE_NOTES.md
+
+          {
+            echo 'body<<NOTES_EOF'
+            cat RELEASE_NOTES.md
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.build.outputs.tag }}
+      TITLE: ${{ needs.build.outputs.title }}
+      BODY: ${{ needs.build.outputs.body }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: dist
+
+      - name: Attach files to the release for this tag
+        run: |
+          set -euo pipefail
+          ls -l dist
+          printf '%s\n' "$BODY" > notes.md
+
+          # A tag ending in -rc1 / -beta / -alpha / -preview is a pre-release and
+          # must not take over the "Latest" badge from the newest stable tag.
+          FLAG=--latest
+          if printf '%s' "$TAG" | grep -qiE '(alpha|beta|preview|nightly|rc)[._-]?[0-9]*$'; then
+            FLAG=--prerelease
+            echo "::notice::$TAG looks like a pre-release; publishing it as such."
+          fi
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists - replacing its assets."
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes-file notes.md \
+              "$FLAG"
+          fi
+
+          echo "Published: $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"

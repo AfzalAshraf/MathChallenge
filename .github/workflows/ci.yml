@@ -1,0 +1,124 @@
+name: CI
+
+# Fast validation on every push and pull request. Catches the three things that
+# actually break this app before the release workflow tries to package it:
+#   1. a PowerShell syntax error,
+#   2. malformed XAML (the UI is a XAML here-string loaded at runtime, so a
+#      single stray character kills the app on launch),
+#   3. a $w.FindName("x") call whose x:Name no longer exists in that XAML
+#      (renaming an element in the UI but not in the code -> $null at runtime).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCRIPT: MathChallenge.ps1
+
+jobs:
+  validate:
+    name: Validate PowerShell + XAML
+    runs-on: ubuntu-latest   # the AST parser and [xml] are cross-platform; no Windows runner needed
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: PowerShell syntax check
+        id: parse
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null; $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $env:SCRIPT).Path, [ref]$tokens, [ref]$errors)
+
+          if ($errors -and $errors.Count -gt 0) {
+            foreach ($e in $errors) {
+              Write-Host "::error file=$($env:SCRIPT),line=$($e.Extent.StartLineNumber),col=$($e.Extent.StartColumnNumber)::$($e.Message)"
+            }
+            throw "$($errors.Count) PowerShell syntax error(s) in $($env:SCRIPT)."
+          }
+
+          $funcs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+          Write-Host "OK: $($tokens.Count) tokens, $($funcs.Count) functions, 0 syntax errors."
+
+      - name: XAML is well-formed and every FindName target exists
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null; $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $env:SCRIPT).Path, [ref]$tokens, [ref]$errors)
+
+          # Locate `[xml]$xaml = @" ... "@` via the AST rather than a regex, so the
+          # check keeps working no matter how the assignment is formatted.
+          $assign = $ast.FindAll({
+              param($n)
+              $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+              $n.Left.Extent.Text -match 'xaml'
+            }, $true) | Select-Object -First 1
+          if (-not $assign) { throw "Could not find the XAML here-string assignment in $($env:SCRIPT)." }
+
+          $raw = $assign.Right.Extent.Text -split "`r?`n"
+          if ($raw.Count -lt 3) { throw "XAML here-string looks truncated ($($raw.Count) lines)." }
+          $inner = ($raw[1..($raw.Count - 2)] -join "`n")   # drop the @" and "@ delimiter lines
+
+          [xml]$doc = $inner                                # throws on malformed XML
+          $root = $doc.DocumentElement
+          Write-Host "XAML OK: <$($root.LocalName) Title='$($root.GetAttribute('Title'))'>, $(@($doc.SelectNodes('//*')).Count) elements."
+
+          # x:Name values declared in the UI
+          $xns   = 'http://schemas.microsoft.com/winfx/2006/xaml'
+          $names = @($doc.SelectNodes('//*') | ForEach-Object { $_.GetAttribute('Name', $xns) } | Where-Object { $_ })
+
+          # Names the script asks the window for at runtime
+          $refs = @([regex]::Matches((Get-Content -Raw $env:SCRIPT), '\$w\.FindName\("([^"]+)"\)') |
+                    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+
+          $missing = @($refs | Where-Object { $names -notcontains $_ })
+          Write-Host "UI wiring: $($refs.Count) FindName references, $($names.Count) x:Name declarations."
+          if ($missing.Count -gt 0) {
+            foreach ($m in $missing) { Write-Host "::error file=$($env:SCRIPT)::$`$w.FindName('$m') has no matching x:Name in the XAML." }
+            throw "$($missing.Count) FindName reference(s) point at controls that do not exist."
+          }
+
+      - name: Packaging inputs exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in MathChallenge.ps1 LICENSE packaging/README.txt packaging/Launch-MathChallenge.bat .github/workflows/release.yml; do
+            if [ -f "$f" ]; then echo "ok       $f"; else echo "::error::missing $f"; missing=1; fi
+          done
+          # A .bat launcher must keep CRLF line endings or cmd.exe can misbehave.
+          if ! grep -q $'\r' packaging/Launch-MathChallenge.bat; then
+            echo "::error::packaging/Launch-MathChallenge.bat lost its CRLF line endings"
+            missing=1
+          fi
+          exit $missing
+
+      - name: Static analysis (advisory, never fails the build)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -AllowClobber
+          Import-Module PSScriptAnalyzer
+          $issues = @(Invoke-ScriptAnalyzer -Path $env:SCRIPT -Severity Error, Warning)
+          if ($issues.Count -eq 0) { Write-Host 'PSScriptAnalyzer: no error/warning-level issues.'; exit 0 }
+          $issues | Group-Object RuleName | Sort-Object Count -Descending |
+            Select-Object Count, Name | Format-Table -AutoSize | Out-String -Width 120 | Write-Host
+          # Put the breakdown in the annotation as well, since a job's log output
+          # is not always reachable from the PR conversation.
+          $summary = ($issues | Group-Object RuleName | Sort-Object Count -Descending |
+                      ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+          Write-Host "::warning::PSScriptAnalyzer reported $($issues.Count) issue(s): $summary"
